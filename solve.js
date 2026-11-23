@@ -247,9 +247,11 @@ function fmValueOf(key, raw) {
   }
 }
 
-/** Whether `line` is blank (spaces and tabs only). */
+/** Whether `line` is blank (spaces and tabs only). Most lines start with a non-space, so that decides it at once. */
 function isBlank(line) {
-  for (let j = 0; j < line.length; j++) {
+  if (line.length === 0) return true;
+  if (line.charCodeAt(0) !== 32 && line.charCodeAt(0) !== 9) return false;
+  for (let j = 1; j < line.length; j++) {
     const c = line.charCodeAt(j);
     if (c !== 32 && c !== 9) return false;
   }
@@ -386,9 +388,15 @@ function isContinued(line) {
   return !isWSCode(line.charCodeAt(j));
 }
 
-/** Whether `line` ends a paragraph. */
+/** Whether `line` ends a paragraph. One first-character test picks the only check that can say yes: a fence, heading or rule cannot start with a space, so an indented line ends a paragraph only by being blank. */
 function endsParagraph(line) {
-  return isBlank(line) || fenceOpen(line) !== null || headingOf(line) !== null || isHr(line);
+  if (line.length === 0) return true;
+  const c = line.charCodeAt(0);
+  if (c === 32 || c === 9) return isBlank(line);
+  if (c === 96) return fenceOpen(line) !== null;
+  if (c === 35) return headingOf(line) !== null;
+  if (c === 45 || c === 42) return isHr(line);
+  return false;
 }
 
 /** The characters a backslash escapes. */
@@ -427,20 +435,16 @@ function findSingleStar(s, from, end) {
 
 const INLINE_TEST = /[\\`*\[&<>"']/;
 
-/** Stop characters for the inline run scanner (ASCII codes). */
-const INLINE_STOP = new Uint8Array(128);
-for (const c of [92, 96, 42, 91, 38, 60, 62, 34, 39]) INLINE_STOP[c] = 1;
+/** Stop characters for the inline run scanner: \ ` * [ & < > " '. Found with one RegExp search instead of a per-character loop. */
+const INLINE_STOP_RE = /[\\`*\[&<>"']/g;
 
 /** `s[a..b)` rendered inline into `out`; `link(target)` is a link's href. */
 function inlineInto(s, a, b, link, out) {
   let i = a;
   while (i < b) {
-    let j = i;
-    while (j < b) {
-      const c = s.charCodeAt(j);
-      if (c < 128 && INLINE_STOP[c] !== 0) break;
-      j++;
-    }
+    INLINE_STOP_RE.lastIndex = i;
+    const m = INLINE_STOP_RE.exec(s);
+    const j = m === null || m.index >= b ? b : m.index;
     if (j > i) out.push(s.slice(i, j));
     if (j >= b) break;
     i = j;
@@ -972,6 +976,20 @@ export function build(input) {
   // 4. Each body's Markdown, its links resolved to the pages and static files they name.
   const staticPaths = new Set(statics.map((f) => f.path));
   const broken = new Set();
+  const resolved = new Map();
+  const resolveCached = (dir, rel) => {
+    let byDir = resolved.get(dir);
+    if (byDir === undefined) {
+      byDir = new Map();
+      resolved.set(dir, byDir);
+    }
+    let path = byDir.get(rel);
+    if (path === undefined) {
+      path = resolvePath(dir, rel);
+      byDir.set(rel, path);
+    }
+    return path;
+  };
   for (const s of kept) {
     const dir = dirOf(s.path);
     const link = (target) => {
@@ -979,7 +997,7 @@ export function build(input) {
       const hash = target.indexOf('#');
       const rel = hash === -1 ? target : target.slice(0, hash);
       const frag = hash === -1 ? '' : target.slice(hash);
-      const path = rel === '' ? null : resolvePath(dir, rel);
+      const path = rel === '' ? null : resolveCached(dir, rel);
       if (path !== null && bySource.has(path)) return `${bySource.get(path).url}${frag}`;
       if (path !== null && staticPaths.has(path)) return `${base}/${path}${frag}`;
       broken.add(`broken-link ${s.path} -> ${target}`);
