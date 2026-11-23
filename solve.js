@@ -113,8 +113,7 @@ const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 
 
 /** A YYYY-MM-DD date in words, from the string alone. */
 export function longDate(date) {
-  const [y, m, d] = date.split('-');
-  return `${Number(d)} ${MONTHS[Number(m) - 1]} ${y}`;
+  return `${Number(date.slice(8, 10))} ${MONTHS[Number(date.slice(5, 7)) - 1]} ${date.slice(0, 4)}`;
 }
 
 /** Whether char code `c` is JavaScript whitespace (\s). */
@@ -279,7 +278,9 @@ function parseFrontMatter(lines) {
     const m = FM_LINE.exec(line);
     if (!m) return { error: `line ${i + 1} is not "key: value"` };
     const key = m[1];
-    const raw = (m[2] ?? '').replace(/[ \t]+$/, '');
+    let raw = m[2] ?? '';
+    const lastC = raw.charCodeAt(raw.length - 1);
+    if (lastC === 32 || lastC === 9) raw = raw.replace(/[ \t]+$/, '');
     if (!FM_KEYS.has(key)) return { error: `unknown key "${key}"` };
     if (Object.hasOwn(data, key)) return { error: `key "${key}" is given twice` };
     if (raw === '') return { error: `key "${key}" has no value` };
@@ -537,12 +538,42 @@ function renderMarkdown(lines, start, link, slugCache) {
   const n = lines.length;
   while (i < n) {
     const line = lines[i];
-    if (isBlank(line)) {
+    // One first-character dispatch picks the only block a line can open: a
+    // fence, heading or rule cannot start with a space, so an indented line
+    // is a paragraph unless it is blank. 0 blank, 1 fence, 2 heading, 3 hr,
+    // 4 quote, 5 list, 6 paragraph. Verified equivalent to the old chain
+    // over the practice set's 65,389 lines (dev/micro3.mjs).
+    let kind = 6;
+    let lang = null;
+    let hd = null;
+    let bl = null;
+    let od = null;
+    if (line.length === 0) kind = 0;
+    else {
+      const c0 = line.charCodeAt(0);
+      if (c0 === 32 || c0 === 9) kind = isBlank(line) ? 0 : 6;
+      else if (c0 === 96) {
+        lang = fenceOpen(line);
+        kind = lang !== null ? 1 : 6;
+      } else if (c0 === 35) {
+        hd = headingOf(line);
+        kind = hd !== null ? 2 : 6;
+      } else if (c0 === 45 || c0 === 42) {
+        if (isHr(line)) kind = 3;
+        else {
+          bl = bulletOf(line);
+          kind = bl !== null ? 5 : 6;
+        }
+      } else if (c0 >= 48 && c0 <= 57) {
+        od = orderedOf(line);
+        kind = od !== null ? 5 : 6;
+      } else if (c0 === 62) kind = 4;
+    }
+    if (kind === 0) {
       i++;
       continue;
     }
-    const lang = fenceOpen(line);
-    if (lang !== null) {
+    if (kind === 1) {
       const cls = lang === '' ? '' : ` class="language-${escapeHtml(lang)}"`;
       out.push(`<pre><code${cls}>`);
       i++;
@@ -554,24 +585,22 @@ function renderMarkdown(lines, start, link, slugCache) {
       out.push('</code></pre>\n');
       continue;
     }
-    const hd = headingOf(line);
-    if (hd !== null) {
+    if (kind === 2) {
       const id = uniqueSlug(slugify(hd.text, slugCache), ids);
       out.push(`<h${hd.depth} id="${id}">`);
       const mark = out.length;
-      if (INLINE_TEST.test(hd.text)) inlineInto(hd.text, 0, hd.text.length, link, out);
-      else out.push(hd.text);
+      inlineInto(hd.text, 0, hd.text.length, link, out);
       if (hd.depth === 2 || hd.depth === 3) toc.push({ level: hd.depth, id, html: out.slice(mark).join('') });
       out.push(`</h${hd.depth}>\n`);
       i++;
       continue;
     }
-    if (isHr(line)) {
+    if (kind === 3) {
       out.push('<hr>\n');
       i++;
       continue;
     }
-    if (line.charCodeAt(0) === 62) {
+    if (kind === 4) {
       const body = [];
       while (i < n && lines[i].charCodeAt(0) === 62) {
         const l = lines[i++];
@@ -586,15 +615,12 @@ function renderMarkdown(lines, start, link, slugCache) {
       else {
         const text = ls.join('\n');
         out.push('<blockquote>\n<p>');
-        if (INLINE_TEST.test(text)) inlineInto(text, 0, text.length, link, out);
-        else out.push(text);
+        inlineInto(text, 0, text.length, link, out);
         out.push('</p>\n</blockquote>\n');
       }
       continue;
     }
-    const bl = bulletOf(line);
-    const od = bl === null ? orderedOf(line) : null;
-    if (bl !== null || od !== null) {
+    if (kind === 5) {
       const isOrdered = od !== null;
       const startNum = isOrdered ? od.start : 1;
       const items = [[trimLine(isOrdered ? od.text : bl)]];
@@ -633,8 +659,7 @@ function renderMarkdown(lines, start, link, slugCache) {
       for (const item of items) {
         const text = item.join('\n');
         out.push('<li>');
-        if (INLINE_TEST.test(text)) inlineInto(text, 0, text.length, link, out);
-        else out.push(text);
+        inlineInto(text, 0, text.length, link, out);
         out.push('</li>\n');
       }
       out.push(`</${tag}>\n`);
@@ -646,8 +671,7 @@ function renderMarkdown(lines, start, link, slugCache) {
     const text = body.join('\n');
     out.push('<p>');
     const mark = out.length;
-    if (INLINE_TEST.test(text)) inlineInto(text, 0, text.length, link, out);
-    else out.push(text);
+    inlineInto(text, 0, text.length, link, out);
     if (excerpt === null) excerpt = out.slice(mark).join('');
     out.push('</p>\n');
   }
@@ -747,6 +771,26 @@ function tv(v) {
   return '';
 }
 
+/**
+ * `esc(tv(v))` in one call: a string escaped, a number in JavaScript's
+ * digits, true or false, an array's items joined by ", " then escaped, else "".
+ * Exactly escapeHtml(tv(v)) for every value.
+ */
+function etv(v) {
+  if (typeof v === 'string') return escapeHtml(v);
+  if (typeof v === 'number') return String(v);
+  if (typeof v === 'boolean') return v ? 'true' : 'false';
+  if (Array.isArray(v)) {
+    let s = '';
+    for (let k = 0; k < v.length; k++) {
+      if (k > 0) s += ', ';
+      s += tv(v[k]);
+    }
+    return escapeHtml(s);
+  }
+  return '';
+}
+
 /** Whether a value counts as true in an if. */
 function tru(v) {
   if (Array.isArray(v)) return v.length > 0;
@@ -787,7 +831,7 @@ function compileTemplate(name, src) {
     if (tok.t === 'var' || tok.t === 'raw') {
       const p = pathVar(tok.path);
       curBody().push(
-        tok.t === 'var' ? `out+=esc(tv(lk(${top.sc},${p})));` : `out+=tv(lk(${top.sc},${p}));`,
+        tok.t === 'var' ? `out+=etv(lk(${top.sc},${p}));` : `out+=tv(lk(${top.sc},${p}));`,
       );
       continue;
     }
@@ -838,7 +882,7 @@ function compileTemplate(name, src) {
       uid++;
       const f = `f${uid}`;
       curBody().push(
-        `{const ${f}=T.get(${JSON.stringify(m[1])});if(${f}!==undefined&&d<8)out+=${f}(${top.sc},T,d+1,esc,tv,lk,tru);}`,
+        `{const ${f}=T.get(${JSON.stringify(m[1])});if(${f}!==undefined&&d<8)out+=${f}(${top.sc},T,d+1,esc,tv,lk,tru,etv);}`,
       );
     } else {
       throw new TemplateError(`template "${name}": {% ${tag} %} is not a tag`);
@@ -855,6 +899,7 @@ function compileTemplate(name, src) {
     'tv',
     'lk',
     'tru',
+    'etv',
     `${decls === '' ? '' : `const ${decls};`}let out="";${root.code.join('')}return out;`,
   );
 }
@@ -1075,14 +1120,14 @@ export function build(input) {
   const render = (name, vars) => {
     const fn = templates.get(name);
     if (fn === undefined) return null;
-    return fn({ vars: { site, tags: allTags, recent, ...vars }, parent: null }, templates, 0, escapeHtml, tv, lk, tru);
+    return fn({ vars: { site, tags: allTags, recent, ...vars }, parent: null }, templates, 0, escapeHtml, tv, lk, tru, etv);
   };
   for (const s of kept) {
     const page = {
       ...cardOf(s),
       slug: s.slug,
       content: s.html,
-      toc: s.toc.map((h) => ({ level: h.level, id: h.id, html: h.html })),
+      toc: s.toc,
       newer: linkOf(s.newer ?? null),
       older: linkOf(s.older ?? null),
       is_post: s.post,
