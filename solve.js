@@ -68,18 +68,26 @@ export function slugify(text, cache) {
   let out = '';
   let gap = false;
   if (ascii) {
+    // Collect the kept codes and build the string in one call instead of
+    // concatenating one character at a time.
+    const codes = [];
     for (let i = 0; i < plain.length; i++) {
       const c = plain.charCodeAt(i);
       let keep = -1;
       if (c >= 65 && c <= 90) keep = c + 32;
       else if ((c >= 97 && c <= 122) || (c >= 48 && c <= 57)) keep = c;
       if (keep === -1) {
-        gap = out.length > 0;
+        gap = codes.length > 0;
         continue;
       }
-      if (gap) out += '-';
+      if (gap) codes.push(45);
       gap = false;
-      out += String.fromCharCode(keep);
+      codes.push(keep);
+    }
+    if (codes.length > 65535) {
+      for (const c of codes) out += String.fromCharCode(c);
+    } else {
+      out = String.fromCharCode(...codes);
     }
   } else {
     for (const ch of plain) {
@@ -134,40 +142,22 @@ function isWSCode(c) {
 }
 
 /** The words of a body given as lines: runs of characters other than whitespace. */
+const WS_SEP = new Uint8Array(65536);
+for (const c of [9, 10, 11, 12, 13, 32, 160, 5760, 8232, 8233, 8239, 8287, 12288, 65279]) WS_SEP[c] = 1;
+for (let c = 8192; c <= 8202; c++) WS_SEP[c] = 1;
 function wordsOfLines(lines, start) {
   let count = 0;
   for (let li = start; li < lines.length; li++) {
     const line = lines[li];
-    let inWord = false;
+    // Branchless: w is 1 for a word character, 0 for a separator; a word is
+    // counted exactly when it starts. One table load per character instead of
+    // a chain of comparisons — same count as the old loop on every line
+    // (verified over the practice set).
+    let inWord = 0;
     for (let i = 0; i < line.length; i++) {
-      const c = line.charCodeAt(i);
-      if (c > 32) {
-        if (c < 128) {
-          if (!inWord) {
-            inWord = true;
-            count++;
-          }
-        } else if (
-          c === 160 ||
-          c === 5760 ||
-          (c >= 8192 && c <= 8202) ||
-          c === 8232 ||
-          c === 8233 ||
-          c === 8239 ||
-          c === 8287 ||
-          c === 12288 ||
-          c === 65279
-        )
-          inWord = false;
-        else if (!inWord) {
-          inWord = true;
-          count++;
-        }
-      } else if (c === 32 || (c >= 9 && c <= 13)) inWord = false;
-      else if (!inWord) {
-        inWord = true;
-        count++;
-      }
+      const w = WS_SEP[line.charCodeAt(i)] ^ 1;
+      count += w & (inWord ^ 1);
+      inWord = w;
     }
   }
   return count;
@@ -916,12 +906,26 @@ const SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/;
 /** `rel` from the directory `dir` of a source, or null when it climbs out of the root. */
 function resolvePath(dir, rel) {
   const parts = dir === '' ? [] : dir.split('/');
-  for (const seg of rel.split('/')) {
-    if (seg === '' || seg === '.') continue;
+  // Walk the segments with indexOf instead of splitting rel into an array.
+  let i = 0;
+  const n = rel.length;
+  while (i <= n) {
+    let j = rel.indexOf('/', i);
+    if (j === -1) j = n;
+    if (j === i) {
+      i = j + 1;
+      continue;
+    }
+    const seg = rel.slice(i, j);
+    if (seg === '.') {
+      i = j + 1;
+      continue;
+    }
     if (seg === '..') {
       if (parts.length === 0) return null;
       parts.pop();
     } else parts.push(seg);
+    i = j + 1;
   }
   return parts.join('/');
 }
